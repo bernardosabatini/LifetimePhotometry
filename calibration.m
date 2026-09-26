@@ -333,6 +333,26 @@ function calibrationData = calibration(app, mode, acquireFcn)
 
     % Trim to what was actually recorded, so a stopped sweep still analyses
     aiData = aiData(1:nFilled, :);
+
+    % A sweep that clipped is the worst case for this routine: the fit
+    % does not fail on a flat-topped sinusoid, it just returns a
+    % confident wrong phase, and that calibration then silently biases
+    % every lifetime taken with it.  Said here, before the numbers are
+    % reported, so it cannot be mistaken for a good sweep.
+    [clipped, clipMax, clipCh] = flimir_mixer_saturation(aiData);
+    if clipped
+        clipNames = strtrim(sprintf('ai%d ', clipCh - 1));
+        warning('calibration:mixerSaturated', ...
+            ['Mixer channel(s) %s reached %.2f V during the sweep. The ' ...
+             'fit will still return a phase, but a clipped channel does ' ...
+             'not carry one.'], clipNames, clipMax);
+        uialert(app.fig, sprintf(['Mixer channel(s) %s reached %.2f V ' ...
+            'during this sweep, at the input rail.\n\nThe fit still ' ...
+            'produces numbers from a clipped channel, and they are ' ...
+            'wrong. Increase the attenuator voltage and run the ' ...
+            'calibration again.'], clipNames, clipMax), ...
+            'Mixer Saturation (calibration)', 'Icon', 'warning');
+    end
     outputScans = outputScans(1:nFilled, :);
     sweeps = clipSweeps(sweeps, nFilled);
 

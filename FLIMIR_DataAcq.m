@@ -124,6 +124,8 @@ function FLIMIR_DataAcq()
     app.calibrationFile = '';   % file the current calibration came from
     app.settingsFile = '';      % settings file this session is tied to
     app.storedWindows = struct();  % window geometry from the settings file
+    app.saturationWarned = false;  % one dialog per run, not one per block
+    app.lastMixerMaxAbs = 0;
     app.phaseMonitorColumn = [];   % data column carrying the phase loopback
 
     %% Build GUI
@@ -1016,6 +1018,55 @@ function FLIMIR_DataAcq()
         else
             app.laserToggle.BackgroundColor = [0.94 0.94 0.94];
             app.laserToggle.Text = 'Laser';
+        end
+    end
+
+    function handleMixerSaturation(data, context)
+        % Report mixer channels sitting at the converter's rail.
+        %
+        % The dialog fires once per run.  A block arrives every 0.1 s, so
+        % warning on each one would bury the screen in modal dialogs and
+        % tell you nothing the first did not.  The on-screen banner stays
+        % up for as long as it keeps happening, and the console gets a
+        % line per occurrence for the record.
+        [saturated, maxAbs, channels] = flimir_mixer_saturation(data);
+        app.lastMixerMaxAbs = maxAbs;
+        if ~saturated
+            clearSaturationBanner();
+            return;
+        end
+
+        names = sprintf('ai%d ', channels - 1);
+        showSaturationBanner(sprintf('MIXER SATURATED: %s at %.2f V', ...
+            strtrim(names), maxAbs));
+        fprintf('Mixer saturation during %s: %s at %.3f V\n', ...
+            context, strtrim(names), maxAbs);
+
+        if ~app.saturationWarned
+            app.saturationWarned = true;
+            uialert(app.fig, sprintf(['Mixer channel(s) %s reached ' ...
+                '%.2f V, at the input rail.\n\nA clipped channel still ' ...
+                'fits a phase, so the lifetime and any calibration ' ...
+                'taken now will look plausible and be wrong. Increase ' ...
+                'the attenuator voltage until the peaks come down.'], ...
+                strtrim(names), maxAbs), ...
+                sprintf('Mixer Saturation (%s)', context), 'Icon', 'warning');
+        end
+    end
+
+    function showSaturationBanner(text)
+        if ~isfield(app, 'modeLabel') || ~isvalid(app.modeLabel)
+            return;
+        end
+        app.modeLabel.Text = text;
+        app.modeLabel.FontColor = [0.8 0 0];
+    end
+
+    function clearSaturationBanner()
+        % Put the mode line back to what it normally says
+        if isfield(app, 'modeLabel') && isvalid(app.modeLabel) && ...
+                startsWith(app.modeLabel.Text, 'MIXER SATURATED')
+            updateModeLabel();
         end
     end
 
@@ -2070,6 +2121,10 @@ function FLIMIR_DataAcq()
                 return;
             end
 
+            % Each run gets a fresh warning, so a problem that recurs
+            % on the next run is reported again
+            app.saturationWarned = false;
+
             % Reset counters and buffers
             app.nSamplesWritten = 0;
             app.callbackCount = 0;
@@ -2147,6 +2202,11 @@ function FLIMIR_DataAcq()
             % reading is always recoverable.
             data = flimir_apply_intensity_sign(data, ...
                 app.invertIntensityCheck.Value);
+
+            % A clipped mixer channel still fits a phase, so it has to be
+            % caught here rather than inferred later from a calibration
+            % that will not reproduce
+            handleMixerSaturation(data, 'acquisition');
 
             % Write raw data to binary file (channels-fastest layout)
             if app.fid ~= -1
