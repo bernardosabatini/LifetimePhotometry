@@ -1,0 +1,32 @@
+# Acquired data and calibration records - these are experiment output, not
+# source, and the sweep files run to tens of MB (roughly 40 bytes per scan
+# per channel, with the raw traces kept so a sweep can be reprocessed).
+#
+# Matched by extension rather than by name: a pattern like
+# *_phase_calibration.* also swallows calculate_phase_calibration.m, which
+# is source.
+*.bin
+*.mat
+*_calibration.png
+
+# Settings files are per-rig: they carry absolute save paths and a pointer
+# to a calibration on that machine. FLIMIR_default_settings.json is the
+# shipped default and IS tracked; anything else is somebody's session.
+FLIMIR_settings*.json
+FLIMIR_default_settings[0-9]*.json
+
+# Written at runtime by ThorlabsPMT with the attached head's serial number,
+# so it describes the machine rather than the project
+pmt/ThorPMT2100Settings.xml
+
+# Test output
+*.log
+
+# Local editor/tool configuration
+.claude/
+
+# MATLAB
+*.asv
+*.m~
+*.autosave
+slprj/

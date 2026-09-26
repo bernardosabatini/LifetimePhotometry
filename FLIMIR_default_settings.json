@@ -1,0 +1,20 @@
+{
+  "application": "FLIMIR_DataAcq",
+  "settingsVersion": 1,
+  "savedAt": "2026-09-25 00:00:00",
+  "_comment": "Shipped defaults. Opened when no other settings file is chosen at startup. Set saveDirectory to a real folder and re-save to have Setup run automatically on launch.",
+  "backend": "FlimirDaqSimulated",
+  "device": "Sim1",
+  "sampleRateHz": 1000,
+  "laserPowerV": 0,
+  "phaseShifterV": 0,
+  "windowSeconds": 5,
+  "rollingWindowEnabled": true,
+  "updateIntervalSeconds": 0.1,
+  "detector": "none",
+  "detectorHVPercent": 10,
+  "pmtLinked": false,
+  "saveDirectory": "",
+  "calibrationFile": "",
+  "extraChannels": []
+}
