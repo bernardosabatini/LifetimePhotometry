@@ -1,0 +1,24 @@
+# Normalise line endings so the same file does not look rewritten when it is
+# edited on a different platform.
+#
+# Git stores these as LF and checks them out with whatever the platform
+# wants - CRLF on Windows, LF elsewhere. Without it, opening this project on
+# a Mac or Linux box produces whole-file diffs that hide the real change.
+* text=auto
+
+# Source, always normalised
+*.m      text
+*.cs     text
+*.json   text
+*.xml    text
+*.md     text
+*.gitignore text
+*.gitattributes text
+
+# Binary: never touched, never diffed as text. The shim is a compiled
+# assembly and the RTF carries its own encoding.
+*.dll    binary
+*.mat    binary
+*.bin    binary
+*.png    binary
+*.rtf    binary
