@@ -226,11 +226,11 @@ function FLIMIR_DataAcq()
 
     % --- Laser Power + Phase Shifter (row 3), the two analog outputs ---
     placeInGrid(uilabel(leftGrid, 'Text', 'Power fraction:'), 4, 1);
-    aoGrid = uigridlayout(leftGrid, [1, 5]);
+    aoGrid = uigridlayout(leftGrid, [1, 6]);
     placeInGrid(aoGrid, 4, 2);
     aoGrid.Padding = [0 0 0 0];
     aoGrid.ColumnSpacing = 4;
-    aoGrid.ColumnWidth = {56, 54, 62, 68, '1x'};
+    aoGrid.ColumnWidth = {56, 50, 44, 58, 62, '1x'};
 
     % A fraction, not volts: 0 is dark and 1 is full power on every rig.
     % The two voltages that bracket it live in the power fraction range
@@ -259,7 +259,16 @@ function FLIMIR_DataAcq()
         'ValueChangedFcn', @(~,~) laserToggleChanged());
     app.laserToggle.Layout.Column = 2;
 
-    uilabel(aoGrid, 'Text', 'Phase (V):', 'HorizontalAlignment', 'right');
+    app.fastScanBtn = uibutton(aoGrid, 'Text', 'Find', ...
+        'Enable', 'off', ...
+        'Tooltip', ['Fast power scan: bisect for the highest power ' ...
+                    'fraction whose mixer peaks stay under the set ' ...
+                    'point, in about a second, and apply it.'], ...
+        'ButtonPushedFcn', @(~,~) runFastPowerScan());
+    app.fastScanBtn.Layout.Column = 3;
+
+    phaseLbl = uilabel(aoGrid, 'Text', 'Phase (V):', 'HorizontalAlignment', 'right');
+    phaseLbl.Layout.Column = 4;
 
     app.phaseShifterSpinner = uispinner(aoGrid, 'Value', 0, ...
         'Limits', [0 10], 'Step', 0.1, 'ValueDisplayFormat', '%.2f', ...
@@ -268,6 +277,7 @@ function FLIMIR_DataAcq()
                     'the end. Can be changed while running. Use ' ...
                     'Calibration to map volts to phase.'], ...
         'ValueChangedFcn', @(~,~) applyOutputLevels());
+    app.phaseShifterSpinner.Layout.Column = 5;
 
     % --- Phase monitor loopback (row 5) ---
     % --- Detector (row 5) ---
@@ -1176,6 +1186,32 @@ function FLIMIR_DataAcq()
         end
     end
 
+    function runFastPowerScan()
+        % Hand the output to the scan, take back whatever it found.
+        releaseLaserToggle();
+        result = fast_power_scan(app);
+        if isempty(result)
+            return;
+        end
+        syncAttenuatorSpinners(result.bestPower);
+        applyOutputLevels();
+        refreshSettingsSummary();
+
+        if result.bestPower <= 0
+            uialert(app.fig, sprintf(['Even the smallest power probed put ' ...
+                'the mixers over %.1f V.\n\nThe detector gain or the ' ...
+                'optics need attention - there is no power fraction ' ...
+                'that works.'], result.setpointVolts), ...
+                'Fast Power Scan', 'Icon', 'warning');
+            return;
+        end
+        uialert(app.fig, sprintf(['Power fraction set to %.3f (%.2f V).' ...
+            '\n\nLargest mixer peak stays under the %.1f V set point. ' ...
+            '%d probes.'], result.bestPower, result.bestVolts, ...
+            result.setpointVolts, numel(result.probes)), ...
+            'Fast Power Scan', 'Icon', 'success');
+    end
+
     function attenuatorChangedFrom(src)
         % One value, two boxes.  Whichever was edited wins and the other
         % follows, so the Settings tab can never disagree with the
@@ -1227,6 +1263,7 @@ function FLIMIR_DataAcq()
             app.calibBtn.Enable = 'off';
             app.avgCalibBtn.Enable = 'off';
             app.darkBtn.Enable = 'off';
+            app.fastScanBtn.Enable = 'off';
             return;
         end
 
@@ -1258,6 +1295,7 @@ function FLIMIR_DataAcq()
         end
         app.calibBtn.Enable = 'on';
         app.avgCalibBtn.Enable = 'on';
+        app.fastScanBtn.Enable = 'on';
     end
 
     function setConfigEnabled(tf)
