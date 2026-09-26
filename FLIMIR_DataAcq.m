@@ -123,6 +123,7 @@ function FLIMIR_DataAcq()
     app.rawRange = {};          % ratcheted y limits, as the main chart has
     app.calibrationFile = '';   % file the current calibration came from
     app.settingsFile = '';      % settings file this session is tied to
+    app.powerLut = [];          % measured ao0 volts -> microwatts
     app.storedWindows = struct();  % window geometry from the settings file
     % Per-block record of what was commanded and what came back.  The raw
     % binary holds the acquired channels and nothing else, so a change to
@@ -195,8 +196,8 @@ function FLIMIR_DataAcq()
         'FontName', 'Consolas', 'Value', {''});
     app.settingsSummary.Layout.Row = 3;
 
-    leftGrid = uigridlayout(leftPanel, [19, 2]);
-    leftGrid.RowHeight = repmat({30}, 1, 19);
+    leftGrid = uigridlayout(leftPanel, [20, 2]);
+    leftGrid.RowHeight = repmat({30}, 1, 20);
     leftGrid.RowHeight{12} = '1x';  % extra channels table gets remaining space
     leftGrid.ColumnWidth = {115, '1x'};  % fixed label column, rest to controls
 
@@ -673,7 +674,39 @@ function FLIMIR_DataAcq()
         'ValueChangedFcn', @(~,~) refreshSettingsSummary());
     app.backoffSetpointSpinner.Layout.Column = 3;
 
-    % --- Derived values in the saved record (row 18) --------------------
+    % --- Power LUT (row 18) ---------------------------------------------
+    % Read only, by design.  The LUT tells you what the current setting
+    % is producing in microwatts; it does not become a way of setting
+    % power, because the table is partial and asking for a power outside
+    % it has no answer.  ao0 is still driven by the power fraction.
+    placeInGrid(uilabel(leftGrid, 'Text', 'Power LUT:'), 18, 1);
+    lutGrid = uigridlayout(leftGrid, [1, 3]);
+    placeInGrid(lutGrid, 18, 2);
+    lutGrid.Padding = [0 0 0 0];
+    lutGrid.ColumnSpacing = 4;
+    lutGrid.ColumnWidth = {'1x', 58, 108};
+
+    app.lutFileEdit = uieditfield(lutGrid, 'text', 'Editable', 'off', ...
+        'Value', '', 'Placeholder', '(no LUT loaded)', ...
+        'Tooltip', ['Measured table of ao0 voltage against output ' ...
+                    'power in microwatts. Two columns, any common ' ...
+                    'separator; header and comment lines are skipped.']);
+    app.lutFileEdit.Layout.Column = 1;
+
+    app.lutLoadBtn = uibutton(lutGrid, 'Text', 'Load LUT', ...
+        'Tooltip', 'Load a measured voltage/microwatt table.', ...
+        'ButtonPushedFcn', @(~,~) loadPowerLut());
+    app.lutLoadBtn.Layout.Column = 2;
+
+    app.lutPowerLabel = uilabel(lutGrid, 'Text', '--', ...
+        'HorizontalAlignment', 'right', 'FontWeight', 'bold', ...
+        'Tooltip', ['Estimated output power at the current setting. ' ...
+                    'Blank outside the measured range - the table is ' ...
+                    'partial and extrapolating it would invent a ' ...
+                    'number that looks measured.']);
+    app.lutPowerLabel.Layout.Column = 3;
+
+    % --- Derived values in the saved record (row 19) --------------------
     % Measured, not assumed: the lifetime estimate costs 0.1 ms per block
     % against a 100 ms budget at 1 kHz, and about 1 ms at 250 kHz - and
     % it is computed for the display whether or not it is saved. So there
@@ -688,11 +721,11 @@ function FLIMIR_DataAcq()
                     'power change partway through a run is always in ' ...
                     'the record.'], ...
         'ValueChangedFcn', @(~,~) refreshSettingsSummary());
-    placeInGrid(app.saveLifetimeCheck, 18, [1 2]);
+    placeInGrid(app.saveLifetimeCheck, 19, [1 2]);
 
     % --- Settings file buttons -----------------------------------------
     settingsBtnGrid = uigridlayout(leftGrid, [1, 2]);
-    placeInGrid(settingsBtnGrid, 19, [1 2]);
+    placeInGrid(settingsBtnGrid, 20, [1 2]);
     settingsBtnGrid.Padding = [0 0 0 0];
     settingsBtnGrid.ColumnWidth = {'1x', '1x'};
     uibutton(settingsBtnGrid, 'Text', 'Save Settings', ...
@@ -1044,6 +1077,7 @@ function FLIMIR_DataAcq()
             app.device.LaserOffVolts = laserOffVolts();
         end
         applyOutputLevels();
+        updatePowerEstimate();
         if ~app.isRunning && ~app.laserToggle.Value
             parkLaser();
         end
@@ -1234,6 +1268,59 @@ function FLIMIR_DataAcq()
         end
     end
 
+    function loadPowerLut()
+        [fileName, pathName] = uigetfile( ...
+            {'*.csv;*.txt;*.dat', 'LUT files (*.csv, *.txt, *.dat)'; ...
+             '*.*', 'All files'}, 'Load Power LUT');
+        focusAppWindow();
+        if isequal(fileName, 0)
+            return;
+        end
+        try
+            app.powerLut = flimir_load_power_lut(fullfile(pathName, fileName));
+        catch ME
+            uialert(app.fig, sprintf('Could not read that LUT:\n%s', ...
+                ME.message), 'Power LUT Error');
+            return;
+        end
+        app.lutFileEdit.Value = app.powerLut.file;
+        app.lutFileEdit.Tooltip = app.powerLut.file;
+        updatePowerEstimate();
+        refreshSettingsSummary();
+        uialert(app.fig, sprintf(['Loaded %d points covering %.2f to ' ...
+            '%.2f V in %.2f V steps.\n\nSettings outside that range ' ...
+            'report no estimate rather than an extrapolated one.'], ...
+            app.powerLut.nPoints, app.powerLut.voltRange(1), ...
+            app.powerLut.voltRange(2), app.powerLut.stepVolts), ...
+            'Power LUT Loaded', 'Icon', 'success');
+    end
+
+    function updatePowerEstimate()
+        % The estimate for whatever ao0 is being asked for right now.
+        if ~isfield(app, 'lutPowerLabel') || ~isvalid(app.lutPowerLabel)
+            return;
+        end
+        volts = laserVoltsFor(app.laserPowerSpinner.Value);
+        [uw, status] = flimir_estimate_power(app.powerLut, volts);
+        switch status
+            case 'ok'
+                if uw >= 1000
+                    app.lutPowerLabel.Text = sprintf('%.3f mW', uw / 1000);
+                else
+                    app.lutPowerLabel.Text = sprintf('%.1f uW', uw);
+                end
+                app.lutPowerLabel.FontColor = [0 0 0];
+            case 'no LUT'
+                app.lutPowerLabel.Text = '--';
+                app.lutPowerLabel.FontColor = [0.5 0.5 0.5];
+            otherwise
+                % Outside the measured range: say so rather than showing
+                % a number the table does not support
+                app.lutPowerLabel.Text = sprintf('%.2f V: %s', volts, status);
+                app.lutPowerLabel.FontColor = [0.75 0.35 0];
+        end
+    end
+
     function runFastPowerScan()
         % Hand the output to the scan, take back whatever it found.
         releaseLaserToggle();
@@ -1266,6 +1353,7 @@ function FLIMIR_DataAcq()
         % Acquisition tab about what the attenuator is set to.
         syncAttenuatorSpinners(src.Value);
         applyOutputLevels();
+        updatePowerEstimate();
     end
 
     function syncAttenuatorSpinners(volts)
@@ -2344,6 +2432,7 @@ function FLIMIR_DataAcq()
             metadata.phaseShifterV = app.phaseVolts;
             metadata.mixerCalibration = app.mixerCalibration;
             metadata.invertIntensity = logical(app.invertIntensityCheck.Value);
+            metadata.powerLut = app.powerLut;   %% empty when none loaded
             metadata.updateInterval = app.blockPeriod;
             metadata.startTime = char(app.startTime);
             metadata.dataFile = app.dataFile;
@@ -2580,6 +2669,11 @@ function FLIMIR_DataAcq()
         settings.invertIntensity = logical(app.invertIntensityCheck.Value);
         settings.powerMinVolts = app.powerMinSpinner.Value;
         settings.powerMaxVolts = app.powerMaxSpinner.Value;
+        if ~isempty(app.powerLut)
+            settings.powerLutFile = app.powerLut.file;
+        else
+            settings.powerLutFile = '';
+        end
         settings.autoBackoff = logical(app.autoBackoffCheck.Value);
         settings.saveLifetime = logical(app.saveLifetimeCheck.Value);
         settings.backoffSetpointV = app.backoffSetpointSpinner.Value;
@@ -2884,6 +2978,15 @@ function FLIMIR_DataAcq()
         % them rather than silently starting such a rig at full power.
         rangeMin = pickField(settings, 'powerMinVolts');
         rangeMax = pickField(settings, 'powerMaxVolts');
+        lutFile = pickField(settings, 'powerLutFile');
+        if ~isempty(lutFile) && isfile(char(string(lutFile)))
+            try
+                app.powerLut = flimir_load_power_lut(char(string(lutFile)));
+                app.lutFileEdit.Value = app.powerLut.file;
+            catch
+                %% A LUT that will not load leaves the estimate blank
+            end
+        end
         if isempty(rangeMin) || isempty(rangeMax)
             invLaser = pickField(settings, 'invertLaser');
             wasInverted = ~isempty(invLaser) && logical(invLaser(1));
@@ -3270,6 +3373,20 @@ function FLIMIR_DataAcq()
         L{end+1} = sprintf('  auto back-off  %s  (set point %.1f V)', ...
             onOff(app.autoBackoffCheck.Value), app.backoffSetpointSpinner.Value);
         L{end+1} = sprintf('  save lifetime  %s', onOff(app.saveLifetimeCheck.Value));
+        if isempty(app.powerLut)
+            L{end+1} = '  power LUT      none';
+        else
+            L{end+1} = sprintf('  power LUT      %d pts, %.2f-%.2f V (%s)', ...
+                app.powerLut.nPoints, app.powerLut.voltRange(1), ...
+                app.powerLut.voltRange(2), app.powerLut.file);
+            [uw, st] = flimir_estimate_power(app.powerLut, ...
+                laserVoltsFor(app.laserPowerSpinner.Value));
+            if strcmp(st, 'ok')
+                L{end+1} = sprintf('  est. output    %.1f uW', uw);
+            else
+                L{end+1} = sprintf('  est. output    n/a (%s)', st);
+            end
+        end
         L{end+1} = sprintf('  phase monitor  %s %s', ...
             onOff(app.phaseMonitorCheck.Value), strtrim(app.phaseMonitorEdit.Value));
         L{end+1} = sprintf('  save directory %s', ...
