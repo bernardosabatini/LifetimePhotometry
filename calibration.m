@@ -175,12 +175,14 @@ function calibrationData = calibration(app, mode, acquireFcn)
     laserPowerV = app.laserPowerSpinner.Value;
     invertLaser = isfield(app, 'invertLaserCheck') && app.invertLaserCheck.Value;
     laserLimits = app.laserPowerSpinner.Limits;
+    % The control already holds volts, so the drive level is simply it.
+    % Only the resting level depends on the wiring: an inverted
+    % attenuator is dark at full scale, a directly driven laser at zero.
+    laserDriveV = laserPowerV;
     if invertLaser
-        laserDriveV = laserLimits(2) - laserPowerV;
-        laserRestV  = laserLimits(2);
+        laserRestV = laserLimits(2);
     else
-        laserDriveV = laserPowerV;
-        laserRestV  = 0;
+        laserRestV = 0;
     end
 
     [phaseColumn, sweeps] = buildSweepWaveform(SWEEP_DURATIONS, REST_SECONDS, ...
@@ -197,7 +199,11 @@ function calibrationData = calibration(app, mode, acquireFcn)
     outputScans = [laserColumn, phaseColumn];
     nScans = size(outputScans, 1);
 
-    openShutter = laserPowerV > 0;
+    % Light reaches the sample when the drive differs from the dark
+    % level - BELOW full scale on an inverted attenuator, above zero
+    % on a direct laser. Testing > 0 would hold the shutter open
+    % through a fully attenuated sweep.
+    openShutter = abs(laserDriveV - laserRestV) > 1e-9;
 
     % --- offsets, from the Dark Calibration step --------------------------
     % Not measured here.  Blocking the beam is a physical act, so the
