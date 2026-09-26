@@ -249,7 +249,8 @@ function calibrationData = calibration(app, mode, acquireFcn)
             nScans / rate);
         icon = 'question';
         if ~openShutter
-            msg = sprintf('%s\n\nLaser is 0 V - this will record darkness only.', msg);
+            msg = sprintf(['%s\n\nAttenuator is at its dark level (%.2f V), ' ...
+                'so this will record darkness only.'], msg, laserDriveV);
             icon = 'warning';
         end
         if clipped
