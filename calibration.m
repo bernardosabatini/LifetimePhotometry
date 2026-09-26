@@ -170,21 +170,18 @@ function calibrationData = calibration(app, mode, acquireFcn)
         end
     end
 
-    % Requested laser power, and the volts that actually express it.  A
-    % controller can be wired so full scale means off; the power number
-    % keeps its meaning and only the mapping changes.
-    laserPowerV = app.laserPowerSpinner.Value;
-    invertLaser = isfield(app, 'invertLaserCheck') && app.invertLaserCheck.Value;
-    laserLimits = app.laserPowerSpinner.Limits;
-    % The control already holds volts, so the drive level is simply it.
-    % Only the resting level depends on the wiring: an inverted
-    % attenuator is dark at full scale, a directly driven laser at zero.
-    laserDriveV = laserPowerV;
-    if invertLaser
-        laserRestV = laserLimits(2);
-    else
-        laserRestV = 0;
-    end
+    % Requested power as a fraction, and the volts that express it on
+    % this rig.  Power 0 is dark whichever end of the range that is, so
+    % nothing here needs to know whether the control is inverted.
+    laserPower  = app.laserPowerSpinner.Value;
+    powerMinV   = app.powerMinSpinner.Value;
+    powerMaxV   = app.powerMaxSpinner.Value;
+    laserDriveV = flimir_power_to_volts(laserPower, powerMinV, powerMaxV);
+    laserRestV  = flimir_power_to_volts(0, powerMinV, powerMaxV);
+
+    % Kept under the old name for the record written to disk, which
+    % reports the volts actually driven rather than the fraction
+    laserPowerV = laserDriveV;
 
     [phaseColumn, sweeps] = buildSweepWaveform(SWEEP_DURATIONS, REST_SECONDS, ...
         peakVolts, rate, TOP_DWELL_SECONDS);
@@ -800,29 +797,33 @@ end
 
 % =========================================================================
 
-function [driveV, stepped] = stepAttenuation(app, driveV, restV)
-% One 0.05 V step towards more attenuation, for a saturated sweep.
+function [driveV, stepped] = stepAttenuation(app, driveV, ~)
+% One step down in power, for a saturated sweep.
 %
-% Direction comes from where the resting (dark) level sits rather than
-% being assumed: on an inverted attenuator more attenuation is a higher
-% voltage, on a directly driven laser it is a lower one. Returns stepped
-% false when the control is already as far as it goes, so the caller
-% stops retrying instead of repeating an identical sweep.
+% In fraction terms "less light" is unambiguous - subtract - so there is
+% no direction to work out any more. The step is held at 0.05 V of the
+% rig's own range so the behaviour does not change when a different
+% range is entered. Returns stepped false at zero power, so the caller
+% stops retrying rather than repeating an identical sweep.
 
-    STEP = 0.05;
-    lim = app.laserPowerSpinner.Limits;
-    before = driveV;
-    if restV >= lim(2)
-        driveV = min(lim(2), driveV + STEP);
-    else
-        driveV = max(lim(1), driveV - STEP);
+    STEP_VOLTS = 0.05;
+    minV = app.powerMinSpinner.Value;
+    maxV = app.powerMaxSpinner.Value;
+    span = abs(maxV - minV);
+    if span < eps
+        stepped = false;
+        return;
     end
-    stepped = abs(driveV - before) > 1e-9;
+    stepFraction = STEP_VOLTS / span;
+
+    before = app.laserPowerSpinner.Value;
+    next = max(0, before - stepFraction);
+    stepped = abs(next - before) > 1e-12;
     if stepped
-        % Keep the control showing what the hardware is being driven to
-        app.laserPowerSpinner.Value = driveV;
+        app.laserPowerSpinner.Value = next;
         if isfield(app, 'runAttenSpinner') && isvalid(app.runAttenSpinner)
-            app.runAttenSpinner.Value = driveV;
+            app.runAttenSpinner.Value = next;
         end
     end
+    driveV = flimir_power_to_volts(next, minV, maxV);
 end

@@ -29,7 +29,7 @@ function FLIMIR_DataAcq()
 %   Features:
 %     - Select a DAQ backend and a device from those it discovers
 %     - Configure 5 analog inputs at user-specified sample rate
-%     - Two analog outputs, laser power and phase shifter control, both
+%     - Two analog outputs, laser power fraction and phase shifter control, both
 %       DC, both driven from 0 at the start of an acquisition and
 %       returned to 0 at the end
 %     - Digital output for shutter TTL control
@@ -225,24 +225,24 @@ function FLIMIR_DataAcq()
     placeInGrid(app.sampleRateSpinner, 3, 2);
 
     % --- Laser Power + Phase Shifter (row 3), the two analog outputs ---
-    placeInGrid(uilabel(leftGrid, 'Text', 'Attenuator (V):'), 4, 1);
+    placeInGrid(uilabel(leftGrid, 'Text', 'Power fraction:'), 4, 1);
     aoGrid = uigridlayout(leftGrid, [1, 5]);
     placeInGrid(aoGrid, 4, 2);
     aoGrid.Padding = [0 0 0 0];
     aoGrid.ColumnSpacing = 4;
     aoGrid.ColumnWidth = {56, 54, 62, 68, '1x'};
 
-    % The number in this box IS the voltage on ao0 - no mapping,
-    % nothing to work backwards from. With the attenuator inverted (the
-    % default) 5.00 V is maximum attenuation and therefore dark, and
-    % less voltage means more light.
-    app.laserPowerSpinner = uispinner(aoGrid, 'Value', 5, ...
-        'Limits', [0 5], 'Step', 0.05, 'ValueDisplayFormat', '%.2f', ...
-        'Tooltip', ['Voltage driven onto ao0, 0.00 to 5.00. With the ' ...
-                    'attenuator inverted, 5.00 V is maximum attenuation ' ...
-                    '(dark) and 0.00 V is full light. Held through a ' ...
-                    'calibration sweep and a run, and returned to the ' ...
-                    'dark level at the end of either. Can be changed ' ...
+    % A fraction, not volts: 0 is dark and 1 is full power on every rig.
+    % The two voltages that bracket it live in the power fraction range
+    % below, so nothing here - or anywhere downstream - has to know
+    % whether more light means more volts or fewer.
+    app.laserPowerSpinner = uispinner(aoGrid, 'Value', 0, ...
+        'Limits', [0 1], 'Step', 0.05, 'ValueDisplayFormat', '%.3f', ...
+        'Tooltip', ['Power fraction: 0 is dark, 1 is full power. What ' ...
+                    'voltage that produces is set by the power ' ...
+                    'fraction range below. Held through a ' ...
+                    'calibration sweep and a run, and returned to ' ...
+                    'dark at the end of either. Can be changed ' ...
                     'while running.'], ...
         'ValueChangedFcn', @(src,~) attenuatorChangedFrom(src));
     app.laserPowerSpinner.Layout.Column = 1;
@@ -337,16 +337,37 @@ function FLIMIR_DataAcq()
     % Selecting the PMT says which detector is there; linking says the
     % software may switch it.  They are separate on purpose - you can
     % have the head open for status and still drive the HV by hand.
-    app.invertLaserCheck = uicheckbox(leftGrid, ...
-        'Text', 'Invert attenuator (5 V = maximum attenuation, 0 V = full light)', ...
-        'Value', true, ...
-        'Tooltip', ['For a controller whose full-scale input means off. ' ...
-                    'The power box stays 0 = off to 5 = max either way; ' ...
-                    'only what is driven onto ao0 changes. Everything ' ...
-                    'that parks the laser drives the off level, so ' ...
-                    '"make safe" stays safe.'], ...
-        'ValueChangedFcn', @(~,~) laserInversionChanged());
-    placeInGrid(app.invertLaserCheck, 14, [1 2]);
+    % What the power fraction means in volts on this rig.  Two numbers
+    % measured once, replacing the invert switch: an attenuator simply
+    % has its dark voltage above its full-power one, and nothing else in
+    % the application needs to know which way round that is.
+    placeInGrid(uilabel(leftGrid, 'Text', 'Power fraction range:'), 14, 1);
+    rangeGrid = uigridlayout(leftGrid, [1, 4]);
+    placeInGrid(rangeGrid, 14, 2);
+    rangeGrid.Padding = [0 0 0 0];
+    rangeGrid.ColumnSpacing = 4;
+    rangeGrid.ColumnWidth = {56, 70, 56, '1x'};
+
+    darkLbl = uilabel(rangeGrid, 'Text', 'dark', 'HorizontalAlignment', 'right');
+    darkLbl.Layout.Column = 1;
+    app.powerMinSpinner = uispinner(rangeGrid, 'Value', 5, ...
+        'Limits', [-10 10], 'Step', 0.1, 'ValueDisplayFormat', '%.2f', ...
+        'Tooltip', ['Control voltage that produces no light. For a ' ...
+                    'voltage-controlled attenuator this is the HIGHER ' ...
+                    'of the two - put 5 here and 0 in full, and the ' ...
+                    'reversal is handled everywhere.'], ...
+        'ValueChangedFcn', @(~,~) powerRangeChanged());
+    app.powerMinSpinner.Layout.Column = 2;
+
+    fullLbl = uilabel(rangeGrid, 'Text', 'full', 'HorizontalAlignment', 'right');
+    fullLbl.Layout.Column = 3;
+    app.powerMaxSpinner = uispinner(rangeGrid, 'Value', 0, ...
+        'Limits', [-10 10], 'Step', 0.1, 'ValueDisplayFormat', '%.2f', ...
+        'Tooltip', ['Control voltage that produces full light. May be ' ...
+                    'above or below the dark voltage; the application ' ...
+                    'does not care which.'], ...
+        'ValueChangedFcn', @(~,~) powerRangeChanged());
+    app.powerMaxSpinner.Layout.Column = 4;
 
     app.invertIntensityCheck = uicheckbox(leftGrid, ...
         'Text', 'Invert intensity (ai4 x -1, for a negative-going detector)', ...
@@ -569,15 +590,14 @@ function FLIMIR_DataAcq()
     % want to.  Both boxes drive the same value; editing either moves the
     % other, so there is never a stale number on the tab you are not
     % looking at.
-    attenLabel = uilabel(runGrid, 'Text', 'Attenuator (V)');
+    attenLabel = uilabel(runGrid, 'Text', 'Power fraction (0-1)');
     attenLabel.Layout.Row = 4;
 
-    app.runAttenSpinner = uispinner(runGrid, 'Value', 5, ...
-        'Limits', [0 5], 'Step', 0.05, 'ValueDisplayFormat', '%.2f', ...
-        'Tooltip', ['Voltage on ao0. 5.00 V is maximum attenuation ' ...
-                    '(dark) and 0.00 V is full light when the ' ...
-                    'attenuator is inverted. The same control as on ' ...
-                    'the Settings tab.'], ...
+    app.runAttenSpinner = uispinner(runGrid, 'Value', 0, ...
+        'Limits', [0 1], 'Step', 0.05, 'ValueDisplayFormat', '%.3f', ...
+        'Tooltip', ['Power fraction: 0 is dark, 1 is full power. ' ...
+                    'The same control as on the Settings tab; ' ...
+                    'editing either moves the other.'], ...
         'ValueChangedFcn', @(src,~) attenuatorChangedFrom(src));
     app.runAttenSpinner.Layout.Row = 5;
 
@@ -953,43 +973,35 @@ function FLIMIR_DataAcq()
         app.calibBtn.Enable = 'off';
     end
 
-    function v = laserVoltsFor(setting)
-        % The box already holds volts, so this is the identity.
-        %
-        % It is kept as a named step rather than inlined because every
-        % write to ao0 goes through it, and that is the one place to
-        % change if a controller ever needs a mapping again.
-        v = setting;
+    function v = laserVoltsFor(power)
+        % Power fraction (0 dark, 1 full) to the volts on ao0, using the
+        % range the user measured for this rig.
+        v = flimir_power_to_volts(power, ...
+            app.powerMinSpinner.Value, app.powerMaxSpinner.Value);
     end
 
     function v = laserOffVolts()
-        % The voltage that means "no light".
-        %
-        % Inverted - the normal case for a voltage-controlled attenuator
-        % - that is full scale, not zero. Everything that parks the
+        % The voltage that means "no light" - power zero, whichever end
+        % of the range that happens to be.  Everything that parks the
         % hardware drives THIS, so "make safe" cannot turn the light on.
-        lim = app.laserPowerSpinner.Limits;
-        if app.invertLaserCheck.Value
-            v = lim(2);
-        else
-            v = 0;
-        end
+        v = laserVoltsFor(0);
     end
 
-    function tf = laserIsOn(volts)
-        % Whether that voltage lets any light through.  Used to decide
-        % if the shutter should open: with an attenuator, light is on
-        % when the voltage is BELOW full scale, not above zero.
+    function tf = laserIsOn(power)
+        % Whether any light is being asked for.  In fraction terms this
+        % is simply a non-zero setting, which is the point of the change:
+        % no part of the application has to reason about which voltage
+        % means off any more.
         if nargin < 1
-            volts = app.laserPowerSpinner.Value;
+            power = app.laserPowerSpinner.Value;
         end
-        tf = abs(volts - laserOffVolts()) > 1e-9;
+        tf = power > 0;
     end
 
-    function laserInversionChanged()
-        % Tell the device what "off" now means before anything else can
-        % park the output, then re-assert the current state so the
-        % hardware is never left at the old convention's level.
+    function powerRangeChanged()
+        % Recalibrating what the fraction means changes the voltage the
+        % same setting produces, so tell the device its new dark level
+        % and re-assert the current one before anything else can park.
         if ~isempty(app.device) && isvalid(app.device)
             app.device.LaserOffVolts = laserOffVolts();
         end
@@ -999,6 +1011,7 @@ function FLIMIR_DataAcq()
         end
         refreshSettingsSummary();
     end
+
 
     function laserToggleChanged()
         % Manual on/off, only meaningful when nothing else owns the
@@ -1084,7 +1097,7 @@ function FLIMIR_DataAcq()
             if maxAbs < app.backoffSetpointSpinner.Value
                 app.backingOff = false;
                 fprintf(['Mixer back-off finished: peak %.2f V, below the ' ...
-                    '%.1f V set point, attenuator at %.2f V\n'], maxAbs, ...
+                    '%.1f V set point, power fraction %.3f\n'], maxAbs, ...
                     app.backoffSetpointSpinner.Value, ...
                     app.laserPowerSpinner.Value);
             else
@@ -1126,26 +1139,25 @@ function FLIMIR_DataAcq()
         % attenuator more attenuation is a higher voltage, on a directly
         % driven laser it is a lower one.  Stepping the wrong way here
         % would drive a saturated detector harder.
-        lim = app.laserPowerSpinner.Limits;
-        current = app.laserPowerSpinner.Value;
-        if laserOffVolts() >= lim(2)
-            next = min(lim(2), current + 0.05);
-        else
-            next = max(lim(1), current - 0.05);
+        span = abs(app.powerMaxSpinner.Value - app.powerMinSpinner.Value);
+        if span < eps
+            return;   % a zero-width range cannot be stepped
         end
-        if abs(next - current) < 1e-9
+        current = app.laserPowerSpinner.Value;
+        next = max(0, current - 0.05 / span);
+        if abs(next - current) < 1e-12
             % Already as attenuated as this control goes
             if ~app.backoffAtLimitWarned
                 app.backoffAtLimitWarned = true;
-                fprintf(['Mixer back-off cannot go further: attenuator is ' ...
-                    'at %.2f V and the peak is still %.2f V\n'], current, maxAbs);
+                fprintf(['Mixer back-off cannot go further: power fraction is ' ...
+                    'already 0 and the peak is still %.2f V\n'], maxAbs);
             end
             return;
         end
         syncAttenuatorSpinners(next);
         applyOutputLevels();
-        fprintf('Mixer back-off: peak %.2f V, attenuator %.2f -> %.2f V\n', ...
-            maxAbs, current, next);
+        fprintf('Mixer back-off: peak %.2f V, power fraction %.3f -> %.3f (%.2f V)\n', ...
+            maxAbs, current, next, laserVoltsFor(next));
     end
 
     function showSaturationBanner(text)
@@ -2453,7 +2465,7 @@ function FLIMIR_DataAcq()
         settings.backend = char(string(app.backendDropdown.Value));
         settings.device = char(string(app.deviceDropdown.Value));
         settings.sampleRateHz = app.sampleRateSpinner.Value;
-        settings.laserPowerV = app.laserPowerSpinner.Value;
+        settings.laserPower = app.laserPowerSpinner.Value;
         settings.phaseShifterV = app.phaseShifterSpinner.Value;
         settings.windowSeconds = app.rollingWindowSpinner.Value;
         settings.rollingWindowEnabled = logical(app.rollingWindowCheck.Value);
@@ -2463,7 +2475,8 @@ function FLIMIR_DataAcq()
         settings.detectorSerial = char(string(app.detectorDeviceDropdown.Value));
         settings.pmtLinked = logical(app.pmtLinkCheck.Value);
         settings.invertIntensity = logical(app.invertIntensityCheck.Value);
-        settings.invertLaser = logical(app.invertLaserCheck.Value);
+        settings.powerMinVolts = app.powerMinSpinner.Value;
+        settings.powerMaxVolts = app.powerMaxSpinner.Value;
         settings.autoBackoff = logical(app.autoBackoffCheck.Value);
         settings.backoffSetpointV = app.backoffSetpointSpinner.Value;
         settings.saveDirectory = app.saveDirEdit.Value;
@@ -2761,7 +2774,36 @@ function FLIMIR_DataAcq()
         % Every field is optional, so a hand-written file containing only
         % the keys of interest loads fine.
         setSpinnerSafe(app.sampleRateSpinner, pickField(settings, 'sampleRateHz'));
-        setSpinnerSafe(app.laserPowerSpinner, pickField(settings, 'laserPowerV'));
+        % The power range, and a migration for files written when the
+        % control was calibrated in volts with a separate invert switch.
+        % Those files carry laserPowerV and invertLaser instead; read
+        % them rather than silently starting such a rig at full power.
+        rangeMin = pickField(settings, 'powerMinVolts');
+        rangeMax = pickField(settings, 'powerMaxVolts');
+        if isempty(rangeMin) || isempty(rangeMax)
+            invLaser = pickField(settings, 'invertLaser');
+            wasInverted = ~isempty(invLaser) && logical(invLaser(1));
+            if wasInverted
+                rangeMin = 5; rangeMax = 0;
+            else
+                rangeMin = 0; rangeMax = 5;
+            end
+        end
+        setSpinnerSafe(app.powerMinSpinner, rangeMin);
+        setSpinnerSafe(app.powerMaxSpinner, rangeMax);
+
+        % Power as a fraction, or converted from a volts setting written
+        % before the change - using the range resolved just above, so a
+        % migrated file reproduces the light level it described.
+        storedPower = pickField(settings, 'laserPower');
+        if isempty(storedPower)
+            storedVolts = pickField(settings, 'laserPowerV');
+            if ~isempty(storedVolts)
+                storedPower = flimir_volts_to_power(storedVolts(1), ...
+                    app.powerMinSpinner.Value, app.powerMaxSpinner.Value);
+            end
+        end
+        setSpinnerSafe(app.laserPowerSpinner, storedPower);
         syncAttenuatorSpinners(app.laserPowerSpinner.Value);
         setSpinnerSafe(app.phaseShifterSpinner, pickField(settings, 'phaseShifterV'));
         setSpinnerSafe(app.rollingWindowSpinner, pickField(settings, 'windowSeconds'));
@@ -2787,10 +2829,6 @@ function FLIMIR_DataAcq()
             app.autoBackoffCheck.Value = logical(abFlag);
         end
 
-        invLaser = pickField(settings, 'invertLaser');
-        if isscalar(invLaser) && (islogical(invLaser) || (isnumeric(invLaser) && ismember(invLaser, [0 1])))
-            app.invertLaserCheck.Value = logical(invLaser);
-        end
 
         invFlag = pickField(settings, 'invertIntensity');
         if isscalar(invFlag) && (islogical(invFlag) || (isnumeric(invFlag) && ismember(invFlag, [0 1])))
@@ -3110,14 +3148,16 @@ function FLIMIR_DataAcq()
         L{end+1} = sprintf('  backend        %s', app.backendDropdown.Value);
         L{end+1} = sprintf('  device         %s', string(app.deviceDropdown.Value));
         L{end+1} = sprintf('  sample rate    %g Hz', app.sampleRateSpinner.Value);
-        L{end+1} = sprintf('  attenuator     %.2f V', app.laserPowerSpinner.Value);
+        L{end+1} = sprintf('  power fraction %.3f  (%.2f V)', ...
+            app.laserPowerSpinner.Value, ...
+            laserVoltsFor(app.laserPowerSpinner.Value));
         L{end+1} = sprintf('  phase shifter  %.2f V', app.phaseShifterSpinner.Value);
         L{end+1} = sprintf('  window         %g s, update %g s', ...
             app.rollingWindowSpinner.Value, app.updateIntervalSpinner.Value);
         L{end+1} = sprintf('  rolling window %s', onOff(app.rollingWindowCheck.Value));
         L{end+1} = sprintf('  invert ai4     %s', onOff(app.invertIntensityCheck.Value));
-        L{end+1} = sprintf('  invert atten.  %s  (dark = %.2f V)', ...
-            onOff(app.invertLaserCheck.Value), laserOffVolts());
+        L{end+1} = sprintf('  fraction range %.2f V dark -> %.2f V full', ...
+            app.powerMinSpinner.Value, app.powerMaxSpinner.Value);
         L{end+1} = sprintf('  auto back-off  %s  (set point %.1f V)', ...
             onOff(app.autoBackoffCheck.Value), app.backoffSetpointSpinner.Value);
         L{end+1} = sprintf('  phase monitor  %s %s', ...
