@@ -124,6 +124,17 @@ function FLIMIR_DataAcq()
     app.calibrationFile = '';   % file the current calibration came from
     app.settingsFile = '';      % settings file this session is tied to
     app.storedWindows = struct();  % window geometry from the settings file
+    % Per-block record of what was commanded and what came back.  The raw
+    % binary holds the acquired channels and nothing else, so a change to
+    % the laser output partway through a run left no trace in the data -
+    % the metadata recorded only the level it started at.  This carries
+    % the commanded output alongside the derived values, one row per
+    % block, and is written with the metadata when the run ends.
+    app.blockLogColumns = {'time_s', 'ao0_volts', 'powerFraction', ...
+                           'lifetime_ns', 'S', 'G', 'intensity_V'};
+    app.blockLog = [];
+    app.blockLogRows = 0;
+
     app.saturationWarned = false;  % one dialog per run, not one per block
     app.lastMixerMaxAbs = 0;
     app.backingOff = false;         % stepping the attenuator back right now
@@ -184,8 +195,8 @@ function FLIMIR_DataAcq()
         'FontName', 'Consolas', 'Value', {''});
     app.settingsSummary.Layout.Row = 3;
 
-    leftGrid = uigridlayout(leftPanel, [18, 2]);
-    leftGrid.RowHeight = repmat({30}, 1, 18);
+    leftGrid = uigridlayout(leftPanel, [19, 2]);
+    leftGrid.RowHeight = repmat({30}, 1, 19);
     leftGrid.RowHeight{12} = '1x';  % extra channels table gets remaining space
     leftGrid.ColumnWidth = {115, '1x'};  % fixed label column, rest to controls
 
@@ -662,9 +673,26 @@ function FLIMIR_DataAcq()
         'ValueChangedFcn', @(~,~) refreshSettingsSummary());
     app.backoffSetpointSpinner.Layout.Column = 3;
 
+    % --- Derived values in the saved record (row 18) --------------------
+    % Measured, not assumed: the lifetime estimate costs 0.1 ms per block
+    % against a 100 ms budget at 1 kHz, and about 1 ms at 250 kHz - and
+    % it is computed for the display whether or not it is saved. So there
+    % is no deferred-processing mode here; the switch only decides
+    % whether the numbers are written down.
+    app.saveLifetimeCheck = uicheckbox(leftGrid, ...
+        'Text', 'Save lifetime, S and G with the data (adds ~0.1% per block)', ...
+        'Value', true, ...
+        'Tooltip', ['Write the per-block lifetime, phasor coordinates ' ...
+                    'and intensity into the run''s metadata file. The ' ...
+                    'commanded ao0 voltage is recorded either way, so a ' ...
+                    'power change partway through a run is always in ' ...
+                    'the record.'], ...
+        'ValueChangedFcn', @(~,~) refreshSettingsSummary());
+    placeInGrid(app.saveLifetimeCheck, 18, [1 2]);
+
     % --- Settings file buttons -----------------------------------------
     settingsBtnGrid = uigridlayout(leftGrid, [1, 2]);
-    placeInGrid(settingsBtnGrid, 18, [1 2]);
+    placeInGrid(settingsBtnGrid, 19, [1 2]);
     settingsBtnGrid.Padding = [0 0 0 0];
     settingsBtnGrid.ColumnWidth = {'1x', '1x'};
     uibutton(settingsBtnGrid, 'Text', 'Save Settings', ...
@@ -1086,6 +1114,26 @@ function FLIMIR_DataAcq()
             app.laserToggle.BackgroundColor = [0.94 0.94 0.94];
             app.laserToggle.Text = 'Laser';
         end
+    end
+
+    function appendBlockLogRow(t, lifetimeNs, sVal, gVal, intensity)
+        % Grown by doubling rather than one row at a time: appending to a
+        % matrix inside a 10 Hz callback reallocates on every block
+        % otherwise, and that cost does grow with the length of the run.
+        if ~app.saveLifetimeCheck.Value
+            % The commanded output is still recorded - that is what makes
+            % a run reconstructable - but the derived values are not
+            lifetimeNs = NaN; sVal = NaN; gVal = NaN;
+        end
+        row = [t, laserVoltsFor(app.laserPower), app.laserPower, ...
+               lifetimeNs, sVal, gVal, intensity];
+
+        if app.blockLogRows >= size(app.blockLog, 1)
+            newRows = max(1024, 2 * size(app.blockLog, 1));
+            app.blockLog = [app.blockLog; nan(newRows, numel(row))];
+        end
+        app.blockLogRows = app.blockLogRows + 1;
+        app.blockLog(app.blockLogRows, :) = row;
     end
 
     function handleMixerSaturation(data, context)
@@ -2268,6 +2316,8 @@ function FLIMIR_DataAcq()
             % Each run gets a fresh warning, so a problem that recurs
             % on the next run is reported again
             app.saturationWarned = false;
+            app.blockLog = [];
+            app.blockLogRows = 0;
             app.backingOff = false;
             app.backoffAtLimitWarned = false;
 
@@ -2409,6 +2459,13 @@ function FLIMIR_DataAcq()
             appendChartSample(values, rawValues);
             updateTimeLimits();
 
+            % One row per block: what was commanded on ao0 at the time,
+            % and what came out of it.  Accumulated in memory rather than
+            % written here - a file write inside the callback would put
+            % disk latency on the acquisition path for no benefit, since
+            % the whole log is a few hundred kilobytes after an hour.
+            appendBlockLogRow(currentTime, lt, s, g, intens);
+
             % Update phasor plot, keeping only the trail's worth of history
             app.sBuffer(end+1) = s;
             app.gBuffer(end+1) = g;
@@ -2466,7 +2523,15 @@ function FLIMIR_DataAcq()
         try
             endTime = char(datetime('now'));
             nSamplesWritten = app.nSamplesWritten;
-            save(app.metadataFile, 'endTime', 'nSamplesWritten', '-append');
+
+            % Trim the preallocation before saving, so the file holds the
+            % rows that were actually recorded rather than a tail of NaNs
+            blockLog = app.blockLog(1:app.blockLogRows, :);
+            blockLogColumns = app.blockLogColumns;         
+            lifetimeSaved = logical(app.saveLifetimeCheck.Value);
+
+            save(app.metadataFile, 'endTime', 'nSamplesWritten', ...
+                'blockLog', 'blockLogColumns', 'lifetimeSaved', '-append');
         catch ME
             fprintf('Error saving metadata: %s\n', ME.message);
         end
@@ -2516,6 +2581,7 @@ function FLIMIR_DataAcq()
         settings.powerMinVolts = app.powerMinSpinner.Value;
         settings.powerMaxVolts = app.powerMaxSpinner.Value;
         settings.autoBackoff = logical(app.autoBackoffCheck.Value);
+        settings.saveLifetime = logical(app.saveLifetimeCheck.Value);
         settings.backoffSetpointV = app.backoffSetpointSpinner.Value;
         settings.saveDirectory = app.saveDirEdit.Value;
         % The calibration travels with the settings as a path, not a copy:
@@ -2862,6 +2928,11 @@ function FLIMIR_DataAcq()
         wantedSerial = pickField(settings, 'detectorSerial');
 
         setSpinnerSafe(app.backoffSetpointSpinner, pickField(settings, 'backoffSetpointV'));
+        slFlag = pickField(settings, 'saveLifetime');
+        if isscalar(slFlag) && (islogical(slFlag) || (isnumeric(slFlag) && ismember(slFlag, [0 1])))
+            app.saveLifetimeCheck.Value = logical(slFlag);
+        end
+
         abFlag = pickField(settings, 'autoBackoff');
         if isscalar(abFlag) && (islogical(abFlag) || (isnumeric(abFlag) && ismember(abFlag, [0 1])))
             app.autoBackoffCheck.Value = logical(abFlag);
@@ -3198,6 +3269,7 @@ function FLIMIR_DataAcq()
             app.powerMinSpinner.Value, app.powerMaxSpinner.Value);
         L{end+1} = sprintf('  auto back-off  %s  (set point %.1f V)', ...
             onOff(app.autoBackoffCheck.Value), app.backoffSetpointSpinner.Value);
+        L{end+1} = sprintf('  save lifetime  %s', onOff(app.saveLifetimeCheck.Value));
         L{end+1} = sprintf('  phase monitor  %s %s', ...
             onOff(app.phaseMonitorCheck.Value), strtrim(app.phaseMonitorEdit.Value));
         L{end+1} = sprintf('  save directory %s', ...
