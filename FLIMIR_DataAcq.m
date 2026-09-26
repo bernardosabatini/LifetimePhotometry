@@ -240,7 +240,7 @@ function FLIMIR_DataAcq()
                     'calibration sweep and a run, and returned to the ' ...
                     'dark level at the end of either. Can be changed ' ...
                     'while running.'], ...
-        'ValueChangedFcn', @(~,~) applyOutputLevels());
+        'ValueChangedFcn', @(src,~) attenuatorChangedFrom(src));
     app.laserPowerSpinner.Layout.Column = 1;
 
     % Manual benchtop control, independent of a run.  Aligning the lamp
@@ -538,8 +538,8 @@ function FLIMIR_DataAcq()
     app.avgCalibBtn.Layout.Column = 3;
 
     % --- Run controls, on the Acquisition tab --------------------------
-    runGrid = uigridlayout(runPanel, [6, 1]);
-    runGrid.RowHeight = {34, 34, 34, 28, 28, '1x'};
+    runGrid = uigridlayout(runPanel, [8, 1]);
+    runGrid.RowHeight = {34, 34, 34, 18, 30, 28, 28, '1x'};
 
     runSetupBtn = uibutton(runGrid, 'Text', 'Setup Acquisition', ...
         'BackgroundColor', [0.3 0.6 1], ...
@@ -560,9 +560,26 @@ function FLIMIR_DataAcq()
         'ButtonPushedFcn', @(~,~) endAcquisition());
     app.endBtn.Layout.Row = 3;
 
+    % The attenuator, repeated here.  It is the one setting reached for
+    % mid-run, and switching tabs to find it is exactly when you do not
+    % want to.  Both boxes drive the same value; editing either moves the
+    % other, so there is never a stale number on the tab you are not
+    % looking at.
+    attenLabel = uilabel(runGrid, 'Text', 'Attenuator (V)');
+    attenLabel.Layout.Row = 4;
+
+    app.runAttenSpinner = uispinner(runGrid, 'Value', 5, ...
+        'Limits', [0 5], 'Step', 0.05, 'ValueDisplayFormat', '%.2f', ...
+        'Tooltip', ['Voltage on ao0. 5.00 V is maximum attenuation ' ...
+                    '(dark) and 0.00 V is full light when the ' ...
+                    'attenuator is inverted. The same control as on ' ...
+                    'the Settings tab.'], ...
+        'ValueChangedFcn', @(src,~) attenuatorChangedFrom(src));
+    app.runAttenSpinner.Layout.Row = 5;
+
     % Detector state, where it can be seen during a run
     detStatusGrid = uigridlayout(runGrid, [1, 2]);
-    detStatusGrid.Layout.Row = 4;
+    detStatusGrid.Layout.Row = 6;
     detStatusGrid.Padding = [0 0 0 0];
     detStatusGrid.ColumnWidth = {'1x', 22};
     app.detectorStatusLabel = uilabel(detStatusGrid, 'Text', 'Detector: off');
@@ -573,7 +590,7 @@ function FLIMIR_DataAcq()
     % What the run will actually compute, given the calibration state
     app.modeLabel = uilabel(runGrid, 'Text', '', 'FontAngle', 'italic', ...
         'WordWrap', 'on');
-    app.modeLabel.Layout.Row = 5;
+    app.modeLabel.Layout.Row = 7;
 
     % --- Settings file buttons -----------------------------------------
     settingsBtnGrid = uigridlayout(leftGrid, [1, 2]);
@@ -999,6 +1016,25 @@ function FLIMIR_DataAcq()
         else
             app.laserToggle.BackgroundColor = [0.94 0.94 0.94];
             app.laserToggle.Text = 'Laser';
+        end
+    end
+
+    function attenuatorChangedFrom(src)
+        % One value, two boxes.  Whichever was edited wins and the other
+        % follows, so the Settings tab can never disagree with the
+        % Acquisition tab about what the attenuator is set to.
+        syncAttenuatorSpinners(src.Value);
+        applyOutputLevels();
+    end
+
+    function syncAttenuatorSpinners(volts)
+        if isfield(app, 'laserPowerSpinner') && isvalid(app.laserPowerSpinner) ...
+                && app.laserPowerSpinner.Value ~= volts
+            app.laserPowerSpinner.Value = volts;
+        end
+        if isfield(app, 'runAttenSpinner') && isvalid(app.runAttenSpinner) ...
+                && app.runAttenSpinner.Value ~= volts
+            app.runAttenSpinner.Value = volts;
         end
     end
 
@@ -2568,6 +2604,7 @@ function FLIMIR_DataAcq()
         % the keys of interest loads fine.
         setSpinnerSafe(app.sampleRateSpinner, pickField(settings, 'sampleRateHz'));
         setSpinnerSafe(app.laserPowerSpinner, pickField(settings, 'laserPowerV'));
+        syncAttenuatorSpinners(app.laserPowerSpinner.Value);
         setSpinnerSafe(app.phaseShifterSpinner, pickField(settings, 'phaseShifterV'));
         setSpinnerSafe(app.rollingWindowSpinner, pickField(settings, 'windowSeconds'));
         setSpinnerSafe(app.updateIntervalSpinner, ...
