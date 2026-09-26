@@ -62,6 +62,7 @@ function calibrationData = calibration(app, mode, acquireFcn)
     PEAK_VOLTS      = 10;            % top of the ramp
     REST_SECONDS    = 0.5;           % 0 V hold before, between and after
     MAX_SCANS       = 2e6;           % caps memory for the whole sweep
+    MAX_BACKOFF_RETRIES = 20;        % each retry is a full sweep
 
     % Hold at the top of each ramp so the analysis has real data either
     % side of the peak and can keep the full 0 -> PEAK_VOLTS range.  It
@@ -292,6 +293,9 @@ function calibrationData = calibration(app, mode, acquireFcn)
             'type', repmat({'Analog'}, 1, nChannels));
     end
 
+    autoBackoff = isfield(app, 'autoBackoffCheck') && app.autoBackoffCheck.Value;
+    attenuationRetries = 0;
+
     % Rerun re-enters here with a fresh monitor; Abort leaves with nothing.
     while true
         monitor = createMonitor(outputScans, sweeps, rate, nChannels, ...
@@ -321,6 +325,33 @@ function calibrationData = calibration(app, mode, acquireFcn)
         if monitorAborted(monitor.fig)
             markMonitorDone(monitor, 'ABORTED');
             return;                      % no analysis, no archive
+        end
+
+        % A sweep that clipped cannot be fitted, but it can be repeated
+        % at more attenuation.  The attenuator is held fixed for the
+        % duration of a sweep by design, so this is a discard and retry
+        % rather than an adjustment partway through - the data either
+        % describes one attenuator setting or it describes nothing.
+        %
+        % Capped, because each retry costs a full sweep and a detector
+        % that saturates at maximum attenuation is a hardware problem the
+        % software cannot step its way out of.
+        if autoBackoff && attenuationRetries < MAX_BACKOFF_RETRIES
+            probe = flimir_apply_intensity_sign(aiData(1:nFilled, :), invertIntensity);
+            if flimir_mixer_saturation(probe)
+                [laserDriveV, stepped] = stepAttenuation(app, laserDriveV, laserRestV);
+                if stepped
+                    attenuationRetries = attenuationRetries + 1;
+                    outputScans(1:end-nTail, 1) = laserDriveV;
+                    outputScans(end-nTail+1:end, 1) = laserRestV;
+                    fprintf(['Calibration: mixers saturated, attenuator now ' ...
+                        '%.2f V, repeating the sweep (%d of %d)\n'], ...
+                        laserDriveV, attenuationRetries, MAX_BACKOFF_RETRIES);
+                    markMonitorDone(monitor, sprintf( ...
+                        'saturated - retrying at %.2f V', laserDriveV));
+                    continue;
+                end
+            end
         end
         break;
     end
@@ -763,5 +794,34 @@ function s = darkStabilityNote(darkData)
         s = ' (flagged UNSTABLE)';
     else
         s = '';
+    end
+end
+
+% =========================================================================
+
+function [driveV, stepped] = stepAttenuation(app, driveV, restV)
+% One 0.05 V step towards more attenuation, for a saturated sweep.
+%
+% Direction comes from where the resting (dark) level sits rather than
+% being assumed: on an inverted attenuator more attenuation is a higher
+% voltage, on a directly driven laser it is a lower one. Returns stepped
+% false when the control is already as far as it goes, so the caller
+% stops retrying instead of repeating an identical sweep.
+
+    STEP = 0.05;
+    lim = app.laserPowerSpinner.Limits;
+    before = driveV;
+    if restV >= lim(2)
+        driveV = min(lim(2), driveV + STEP);
+    else
+        driveV = max(lim(1), driveV - STEP);
+    end
+    stepped = abs(driveV - before) > 1e-9;
+    if stepped
+        % Keep the control showing what the hardware is being driven to
+        app.laserPowerSpinner.Value = driveV;
+        if isfield(app, 'runAttenSpinner') && isvalid(app.runAttenSpinner)
+            app.runAttenSpinner.Value = driveV;
+        end
     end
 end

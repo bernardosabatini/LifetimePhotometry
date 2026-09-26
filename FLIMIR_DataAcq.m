@@ -126,6 +126,8 @@ function FLIMIR_DataAcq()
     app.storedWindows = struct();  % window geometry from the settings file
     app.saturationWarned = false;  % one dialog per run, not one per block
     app.lastMixerMaxAbs = 0;
+    app.backingOff = false;         % stepping the attenuator back right now
+    app.backoffAtLimitWarned = false;
     app.phaseMonitorColumn = [];   % data column carrying the phase loopback
 
     %% Build GUI
@@ -182,8 +184,8 @@ function FLIMIR_DataAcq()
         'FontName', 'Consolas', 'Value', {''});
     app.settingsSummary.Layout.Row = 3;
 
-    leftGrid = uigridlayout(leftPanel, [17, 2]);
-    leftGrid.RowHeight = repmat({30}, 1, 17);
+    leftGrid = uigridlayout(leftPanel, [18, 2]);
+    leftGrid.RowHeight = repmat({30}, 1, 18);
     leftGrid.RowHeight{12} = '1x';  % extra channels table gets remaining space
     leftGrid.ColumnWidth = {115, '1x'};  % fixed label column, rest to controls
 
@@ -594,9 +596,45 @@ function FLIMIR_DataAcq()
         'WordWrap', 'on');
     app.modeLabel.Layout.Row = 7;
 
+    % --- Saturation back-off (row 17) ----------------------------------
+    % Recovering from a railed mixer is a mechanical response - wind the
+    % attenuator up until the peaks come down - so the software can do
+    % it and say what it did.  The set point is the level it aims to get
+    % below, deliberately well under the rail: recovering to just under
+    % 10 V would re-trigger on the next swing.
+    satGrid = uigridlayout(leftGrid, [1, 3]);
+    placeInGrid(satGrid, 17, [1 2]);
+    satGrid.Padding = [0 0 0 0];
+    satGrid.ColumnSpacing = 4;
+    satGrid.ColumnWidth = {'1x', 96, 62};
+
+    app.autoBackoffCheck = uicheckbox(satGrid, ...
+        'Text', 'Auto-reduce on mixer saturation', ...
+        'Value', true, ...
+        'Tooltip', ['When a mixer channel reaches the rail, step the ' ...
+                    'attenuator up 0.05 V at a time until the largest ' ...
+                    'mixer peak is below the set point. A calibration ' ...
+                    'sweep that saturates is re-run at the new level.'], ...
+        'ValueChangedFcn', @(~,~) refreshSettingsSummary());
+    app.autoBackoffCheck.Layout.Column = 1;
+
+    satLabel = uilabel(satGrid, 'Text', 'set point (V)', ...
+        'HorizontalAlignment', 'right');
+    satLabel.Layout.Column = 2;
+
+    app.backoffSetpointSpinner = uispinner(satGrid, ...
+        'Limits', [0.5 9.9], 'Value', 7, 'Step', 0.5, ...
+        'ValueDisplayFormat', '%.1f', ...
+        'Tooltip', ['Largest mixer peak the back-off aims to get below. ' ...
+                    'Well under the 10 V rail on purpose - recovering ' ...
+                    'to just under it would saturate again on the next ' ...
+                    'swing.'], ...
+        'ValueChangedFcn', @(~,~) refreshSettingsSummary());
+    app.backoffSetpointSpinner.Layout.Column = 3;
+
     % --- Settings file buttons -----------------------------------------
     settingsBtnGrid = uigridlayout(leftGrid, [1, 2]);
-    placeInGrid(settingsBtnGrid, 17, [1 2]);
+    placeInGrid(settingsBtnGrid, 18, [1 2]);
     settingsBtnGrid.Padding = [0 0 0 0];
     settingsBtnGrid.ColumnWidth = {'1x', '1x'};
     uibutton(settingsBtnGrid, 'Text', 'Save Settings', ...
@@ -1031,6 +1069,26 @@ function FLIMIR_DataAcq()
         % line per occurrence for the record.
         [saturated, maxAbs, channels] = flimir_mixer_saturation(data);
         app.lastMixerMaxAbs = maxAbs;
+
+        % Back-off, once started, keeps going until the peaks are under
+        % the set point - not merely off the rail.  Stopping the moment
+        % the channel came unstuck would leave it a hair under the limit
+        % and straight back on it at the next swing.
+        if app.backingOff
+            if maxAbs < app.backoffSetpointSpinner.Value
+                app.backingOff = false;
+                fprintf(['Mixer back-off finished: peak %.2f V, below the ' ...
+                    '%.1f V set point, attenuator at %.2f V\n'], maxAbs, ...
+                    app.backoffSetpointSpinner.Value, ...
+                    app.laserPowerSpinner.Value);
+            else
+                stepAttenuatorForBackoff(maxAbs);
+            end
+        elseif saturated && app.autoBackoffCheck.Value
+            app.backingOff = true;
+            stepAttenuatorForBackoff(maxAbs);
+        end
+
         if ~saturated
             clearSaturationBanner();
             return;
@@ -1052,6 +1110,36 @@ function FLIMIR_DataAcq()
                 strtrim(names), maxAbs), ...
                 sprintf('Mixer Saturation (%s)', context), 'Icon', 'warning');
         end
+    end
+
+    function stepAttenuatorForBackoff(maxAbs)
+        % One 0.05 V step towards more attenuation.
+        %
+        % Which direction that is depends on the wiring, so it goes
+        % through laserOffVolts rather than assuming "up": on an inverted
+        % attenuator more attenuation is a higher voltage, on a directly
+        % driven laser it is a lower one.  Stepping the wrong way here
+        % would drive a saturated detector harder.
+        lim = app.laserPowerSpinner.Limits;
+        current = app.laserPowerSpinner.Value;
+        if laserOffVolts() >= lim(2)
+            next = min(lim(2), current + 0.05);
+        else
+            next = max(lim(1), current - 0.05);
+        end
+        if abs(next - current) < 1e-9
+            % Already as attenuated as this control goes
+            if ~app.backoffAtLimitWarned
+                app.backoffAtLimitWarned = true;
+                fprintf(['Mixer back-off cannot go further: attenuator is ' ...
+                    'at %.2f V and the peak is still %.2f V\n'], current, maxAbs);
+            end
+            return;
+        end
+        syncAttenuatorSpinners(next);
+        applyOutputLevels();
+        fprintf('Mixer back-off: peak %.2f V, attenuator %.2f -> %.2f V\n', ...
+            maxAbs, current, next);
     end
 
     function showSaturationBanner(text)
@@ -2124,6 +2212,8 @@ function FLIMIR_DataAcq()
             % Each run gets a fresh warning, so a problem that recurs
             % on the next run is reported again
             app.saturationWarned = false;
+            app.backingOff = false;
+            app.backoffAtLimitWarned = false;
 
             % Reset counters and buffers
             app.nSamplesWritten = 0;
@@ -2368,6 +2458,8 @@ function FLIMIR_DataAcq()
         settings.pmtLinked = logical(app.pmtLinkCheck.Value);
         settings.invertIntensity = logical(app.invertIntensityCheck.Value);
         settings.invertLaser = logical(app.invertLaserCheck.Value);
+        settings.autoBackoff = logical(app.autoBackoffCheck.Value);
+        settings.backoffSetpointV = app.backoffSetpointSpinner.Value;
         settings.saveDirectory = app.saveDirEdit.Value;
         % The calibration travels with the settings as a path, not a copy:
         % the sweep itself is far too big to inline, and it is already
@@ -2682,6 +2774,12 @@ function FLIMIR_DataAcq()
         % The serial is applied after the detector type, since changing
         % the type re-scans and would otherwise clear it
         wantedSerial = pickField(settings, 'detectorSerial');
+
+        setSpinnerSafe(app.backoffSetpointSpinner, pickField(settings, 'backoffSetpointV'));
+        abFlag = pickField(settings, 'autoBackoff');
+        if isscalar(abFlag) && (islogical(abFlag) || (isnumeric(abFlag) && ismember(abFlag, [0 1])))
+            app.autoBackoffCheck.Value = logical(abFlag);
+        end
 
         invLaser = pickField(settings, 'invertLaser');
         if isscalar(invLaser) && (islogical(invLaser) || (isnumeric(invLaser) && ismember(invLaser, [0 1])))
@@ -3014,6 +3112,8 @@ function FLIMIR_DataAcq()
         L{end+1} = sprintf('  invert ai4     %s', onOff(app.invertIntensityCheck.Value));
         L{end+1} = sprintf('  invert atten.  %s  (dark = %.2f V)', ...
             onOff(app.invertLaserCheck.Value), laserOffVolts());
+        L{end+1} = sprintf('  auto back-off  %s  (set point %.1f V)', ...
+            onOff(app.autoBackoffCheck.Value), app.backoffSetpointSpinner.Value);
         L{end+1} = sprintf('  phase monitor  %s %s', ...
             onOff(app.phaseMonitorCheck.Value), strtrim(app.phaseMonitorEdit.Value));
         L{end+1} = sprintf('  save directory %s', ...
