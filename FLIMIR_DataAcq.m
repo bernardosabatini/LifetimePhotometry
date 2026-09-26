@@ -123,6 +123,7 @@ function FLIMIR_DataAcq()
     app.rawRange = {};          % ratcheted y limits, as the main chart has
     app.calibrationFile = '';   % file the current calibration came from
     app.settingsFile = '';      % settings file this session is tied to
+    app.storedWindows = struct();  % window geometry from the settings file
     app.phaseMonitorColumn = [];   % data column carrying the phase loopback
 
     %% Build GUI
@@ -1335,6 +1336,14 @@ function FLIMIR_DataAcq()
             'Tag', 'FLIMIR_RawChannelMonitor', ...
             'CloseRequestFcn', @(src,~) closeRawChannelWindow(src));
 
+        % Reopen where the settings file left it, if that is still on screen
+        if isfield(app, 'storedWindows') && isfield(app.storedWindows, 'rawChannels')
+            p = sanitiseWindowPosition(app.storedWindows.rawChannels);
+            if ~isempty(p)
+                app.rawFig.Position = p;
+            end
+        end
+
         colors = lines(n);
         app.rawAx = gobjects(1, n);
         app.rawLines = gobjects(1, n);
@@ -2261,6 +2270,12 @@ function FLIMIR_DataAcq()
                 'plot', logical(tableData{i, 3})); %#ok<AGROW>
         end
         settings.extraChannels = channels;
+
+        %% Window geometry, so a rig comes back laid out the way it was left.
+        %% The raw channel monitor is included when it is open; when it is
+        %% not, whatever was stored last is carried through untouched
+        %% rather than dropped, so closing it does not forget its place.
+        settings.windows = collectWindowGeometry();
     end
 
     function saveSettings()
@@ -2292,6 +2307,7 @@ function FLIMIR_DataAcq()
             clear cleanup;  % close before reporting success
 
             app.settingsFile = fullPath;
+            rememberSettingsPath(fullPath);
             refreshSettingsSummary();
             ok = true;
             if announce
@@ -2331,6 +2347,7 @@ function FLIMIR_DataAcq()
             end
             applySettings(settings);
             app.settingsFile = fullPath;
+            rememberSettingsPath(fullPath);
             refreshSettingsSummary();
             ok = true;
         catch ME
@@ -2350,7 +2367,7 @@ function FLIMIR_DataAcq()
         % something to open rather than an empty dialog.
         [fileName, pathName] = uigetfile( ...
             {'*.json', 'Settings files (*.json)'}, ...
-            'Select a settings file for this session', defaultSettingsPath());
+            'Select a settings file for this session', lastSettingsPath());
         focusAppWindow();
         if isequal(fileName, 0)
             % Declining still has to land somewhere defined, so fall back
@@ -2382,6 +2399,113 @@ function FLIMIR_DataAcq()
                 'Settings Incomplete', 'Icon', 'warning');
         end
         refreshSettingsSummary();
+    end
+
+    function g = collectWindowGeometry()
+        % Position and size of each window, in pixels.
+        %
+        % The raw channel monitor is only recorded while it is open.  If
+        % it is shut, the geometry already in the loaded settings is
+        % carried forward rather than written as empty, so closing the
+        % window does not erase where it used to sit.
+        g = struct();
+        if isvalid(app.fig)
+            g.main = app.fig.Position;
+        end
+        if rawWindowOpen()
+            g.rawChannels = app.rawFig.Position;
+        elseif isfield(app, 'storedWindows') && ...
+                isfield(app.storedWindows, 'rawChannels')
+            g.rawChannels = app.storedWindows.rawChannels;
+        end
+    end
+
+    function applyWindowGeometry(g)
+        % Put the windows back where they were, if the saved place is
+        % still on a screen.  A settings file written on a two-monitor rig
+        % and opened on a laptop would otherwise place windows off the
+        % desktop, where they cannot be dragged back.
+        if isempty(g) || ~isstruct(g)
+            return;
+        end
+        app.storedWindows = g;
+        if isfield(g, 'main') && isvalid(app.fig)
+            p = sanitiseWindowPosition(g.main);
+            if ~isempty(p)
+                app.fig.Position = p;
+            end
+        end
+        % The raw window takes its geometry when it is next opened
+        if rawWindowOpen() && isfield(g, 'rawChannels')
+            p = sanitiseWindowPosition(g.rawChannels);
+            if ~isempty(p)
+                app.rawFig.Position = p;
+            end
+        end
+    end
+
+    function p = sanitiseWindowPosition(candidate)
+        % Accept a stored [x y w h] only if it is well formed and leaves a
+        % usable part of the title bar on some screen.  Returning empty
+        % means "leave the window where it is".
+        p = [];
+        if ~isnumeric(candidate) || numel(candidate) ~= 4 || ...
+                ~all(isfinite(candidate))
+            return;
+        end
+        candidate = double(candidate(:)');
+        if candidate(3) < 200 || candidate(4) < 150
+            return;      % too small to be usable
+        end
+
+        % Union of all monitors, as [left bottom right top]
+        mp = get(groot, 'MonitorPositions');
+        visible = false;
+        for k = 1:size(mp, 1)
+            L = mp(k,1); B = mp(k,2);
+            R = L + mp(k,3) - 1; T = B + mp(k,4) - 1;
+            % At least 120 x 30 px of the window's top edge on this screen
+            overlapW = min(candidate(1) + candidate(3), R) - max(candidate(1), L);
+            overlapH = min(candidate(2) + candidate(4), T) - max(candidate(2), B);
+            if overlapW >= 120 && overlapH >= 30
+                visible = true;
+                break;
+            end
+        end
+        if ~visible
+            return;
+        end
+        p = candidate;
+    end
+
+    function p = lastSettingsPath()
+        % Where the settings-file dialog should open.  The file used last
+        % session, if it is still there, so somebody working out of a
+        % folder of per-rig settings files does not navigate back to it
+        % every launch.  Falls back to the shipped default.
+        %
+        % Kept in MATLAB's preference store rather than in a settings
+        % file, because it has to be readable before any settings file
+        % has been chosen.
+        p = defaultSettingsPath();
+        try
+            if ispref('FLIMIR', 'lastSettingsFile')
+                candidate = getpref('FLIMIR', 'lastSettingsFile');
+                if ischar(candidate) && isfile(candidate)
+                    p = candidate;
+                end
+            end
+        catch
+            % A preference store that cannot be read is not worth failing
+            % startup over
+        end
+    end
+
+    function rememberSettingsPath(fullPath)
+        try
+            setpref('FLIMIR', 'lastSettingsFile', char(string(fullPath)));
+        catch
+        end
     end
 
     function p = defaultSettingsPath()
@@ -2467,6 +2591,8 @@ function FLIMIR_DataAcq()
                 app.detectorDeviceDropdown.Value = s;
             end
         end
+
+        applyWindowGeometry(pickField(settings, 'windows'));
 
         saveDir = pickField(settings, 'saveDirectory');
         if (ischar(saveDir) || isstring(saveDir)) && isfolder(saveDir)

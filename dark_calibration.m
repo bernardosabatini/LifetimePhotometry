@@ -146,7 +146,7 @@ function darkData = dark_calibration(app)
         xg = x(good);
         stats(c).mean = mean(xg);
         stats(c).sd = std(xg);
-        stats(c).p2p = range(xg);
+        stats(c).p2p = max(xg) - min(xg);   % range() is Statistics Toolbox
 
         % Drift: slope of a straight line through the second
         p = polyfit(t(good), xg, 1);
@@ -215,6 +215,22 @@ end
 
 % =========================================================================
 
+function w = hannWindow(n)
+% Symmetric Hann window, matching hann(n) from Signal Processing Toolbox.
+%
+% Written out so this file depends on no toolbox.  Symmetric (endpoints
+% at zero, denominator n-1) rather than periodic, because that is what
+% hann() returns by default and what the amplitude scaling below assumes.
+
+    if n == 1
+        w = 1;
+        return;
+    end
+    w = 0.5 - 0.5 * cos(2 * pi * (0:n-1)' / (n - 1));
+end
+
+% =========================================================================
+
 function [hz, mv] = dominantLine(x, rate)
 % Biggest single frequency component, in mV, ignoring DC.  Mains pickup
 % and switching supplies both show up here.
@@ -227,7 +243,7 @@ function [hz, mv] = dominantLine(x, rate)
     end
     % Hann window so a component that is not on a bin centre still reads
     % close to its true amplitude
-    w = hann(n);
+    w = hannWindow(n);
     X = fft(x(:) .* w);
     half = floor(n / 2);
     if half < 2
@@ -323,7 +339,7 @@ function showDarkMonitor(d)
     ax2 = nexttile(tl);
     hold(ax2, 'on');
     n = size(d.ai, 1);
-    w = hann(n);
+    w = hannWindow(n);
     half = floor(n / 2);
     f = (1:half)' * d.rate / n;
     for c = 1:nCh

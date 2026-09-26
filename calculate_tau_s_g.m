@@ -186,11 +186,42 @@ function m = clippedMean(x)
         m = median(x);
         return;
     end
-    limits = prctile(x, [0.5 99.5]);
+    limits = percentileNoToolbox(x, [0.5 99.5]);
     kept = x(x > limits(1) & x < limits(2));
     if isempty(kept)
         m = median(x);
     else
         m = mean(kept);
     end
+end
+
+% =========================================================================
+
+function q = percentileNoToolbox(x, p)
+% Percentiles of a vector, matching prctile from Statistics Toolbox.
+%
+% Written out so this file needs no toolbox.  prctile's definition is
+% specific and worth reproducing exactly rather than approximating: the
+% k-th of n sorted values sits at percentile 100*(k-0.5)/n, values in
+% between are linearly interpolated, and anything outside that range
+% clamps to the smallest or largest sample.  A naive
+% round(p/100*n) index would shift the cut points by half a sample and
+% quietly trim a different set of outliers than the calibration did.
+
+    x = sort(x(isfinite(x)));
+    x = x(:);
+    n = numel(x);
+    if n == 0
+        q = nan(size(p));
+        return;
+    end
+    if n == 1
+        q = repmat(x, size(p));
+        return;
+    end
+    positions = 100 * ((1:n) - 0.5) / n;
+    q = interp1(positions, x, p, 'linear');
+    q(p < positions(1)) = x(1);
+    q(p > positions(end)) = x(end);
+    q = reshape(q, size(p));
 end

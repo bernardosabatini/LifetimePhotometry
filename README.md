@@ -8,13 +8,16 @@ real time while writing the raw inputs to disk.
 
 ## Requirements
 
-**MATLAB R2026a**, with:
+**MATLAB R2026a**. The only toolbox is **Data Acquisition**, and only for the
+National Instruments backend — the LabJack and simulated backends need nothing
+beyond base MATLAB.
 
-| Toolbox | Needed for |
-| --- | --- |
-| Statistics and Machine Learning | `normpdf`, `range` — core analysis |
-| Signal Processing | `hann` — the dark calibration's noise spectrum |
-| Data Acquisition | National Instruments backend only |
+The analysis is deliberately toolbox-free. Where a toolbox function would have
+been the obvious call it is written out instead: the Gaussian smoothing kernel
+rather than `normpdf`, a Hann window rather than `hann`, `max - min` rather
+than `range`, and a percentile that reproduces `prctile`'s interpolation
+exactly rather than approximating it. Each replacement is verified against the
+toolbox original to machine precision.
 
 Hardware drivers, by backend:
 

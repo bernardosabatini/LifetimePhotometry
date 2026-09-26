@@ -41,7 +41,12 @@ function filtered = flimir_gaussian_lp(data, sd)
         return;
     end
 
-    kernel = normpdf((-3 * sd:3 * sd) / sd);
+    % Gaussian written out rather than called from normpdf, so this file
+    % needs no toolbox.  The 1/sqrt(2*pi) scaling cancels in the
+    % normalisation on the next line, but it is kept so the expression
+    % reads as the density it is.
+    z = (-3 * sd:3 * sd) / sd;
+    kernel = exp(-0.5 * z.^2) / sqrt(2 * pi);
     kernel = kernel ./ sum(kernel);
 
     nPad = min(sd, n);

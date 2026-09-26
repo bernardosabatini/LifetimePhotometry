@@ -585,8 +585,9 @@ function chk = checkPhaseMonitor(measured, commanded, rate)
     measured = measured(:);
     commanded = commanded(:);
     good = isfinite(measured) & isfinite(commanded);
-    chk.span = range(measured(good));
-    chk.commandSpan = range(commanded(good));
+    % max-min rather than range(), which is Statistics Toolbox
+    chk.span = max(measured(good)) - min(measured(good));
+    chk.commandSpan = max(commanded(good)) - min(commanded(good));
 
     if nnz(good) < 10 || chk.commandSpan <= 0
         chk.note = 'not enough finite data to compare';
